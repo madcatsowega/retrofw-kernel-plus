@@ -81,6 +81,7 @@ enum {
 	BIT_CABLE_STATE_CHANGE,      
 	
 	BIT_DO_DETECT,
+	BIT_DO_FORCE_DETECT,
 	BIT_DO_NOTIFY,
 
 	/* Keep alive */
@@ -89,6 +90,7 @@ enum {
 };
 
 #define DO_DETECT (1 << BIT_DO_DETECT)
+#define DO_FORCE_DETECT (1 << BIT_DO_FORCE_DETECT)
 #define DO_NOTIFY (1 << BIT_DO_NOTIFY)
 #define DO_ALL ( DO_DETECT | DO_NOTIFY)
 
@@ -131,6 +133,9 @@ static inline void uh_start_work(struct uh_data *uh, int work)
 {
 	if (work & DO_DETECT) 
 		set_bit(BIT_DO_DETECT, &uh->flags);
+
+	if (work & DO_FORCE_DETECT)
+		set_bit(BIT_DO_FORCE_DETECT, &uh->flags);
 
 	if (work & DO_NOTIFY) 
 		set_bit(BIT_DO_NOTIFY, &uh->flags);
@@ -312,9 +317,12 @@ static void do_wait(struct uh_data *uh)
 /* Called from kernel thread */
 static void do_detect(struct uh_data *uh)
 {
+	int force;
+
 	D("Called.\n");
-	
-	if (!test_and_clear_bit(BIT_DO_DETECT, &uh->flags))
+
+	force = test_and_clear_bit(BIT_DO_FORCE_DETECT, &uh->flags);
+	if (!test_and_clear_bit(BIT_DO_DETECT, &uh->flags) && !force)
 		return;
 
 	D("Do detect.\n");
@@ -325,6 +333,16 @@ static void do_detect(struct uh_data *uh)
 		usb_detect(uh);
 		
 		set_cable_state(uh, uh->cable_detect_state);
+	}
+	else if (force)
+	{
+		/* Keep active USB session alive if already online; otherwise probe SOF directly */
+		if (uh->cable_state == UH_CABLE_STATE_USB)
+			return;
+		if (do_usb_detect(uh))
+			set_cable_state(uh, UH_CABLE_STATE_USB);
+		else
+			set_cable_state(uh, UH_CABLE_STATE_OFFLINE);
 	}
 	else
 		set_cable_state(uh, UH_CABLE_STATE_OFFLINE);
@@ -452,10 +470,13 @@ static void uh_keep_alive_timer_func(unsigned long data)
 
 			clear_bit(BIT_KEEP_ALIVE, &uh->flags);
 
-			if (uh->cable_state == UH_CABLE_STATE_USB)
-				set_cable_state(uh, UH_CABLE_STATE_POWER);
-		
-			uh_start_work(uh, DO_NOTIFY);
+			/* Only auto-drop on boards with working VBUS GPIO; when gpio_pin==0,
+			 * gadget stays active until unloaded or explicitly set offline. */
+			if (__gpio_get_pin(uh->gpio_pin)) {
+				if (uh->cable_state == UH_CABLE_STATE_USB)
+					set_cable_state(uh, UH_CABLE_STATE_POWER);
+				uh_start_work(uh, DO_NOTIFY);
+			}
 		}
 	}
 
@@ -538,16 +559,23 @@ EXPORT_SYMBOL(uh_alive);
 int uh_register_notifier(struct notifier_block *n)
 {
 	struct uh_data *uh = g_puh_data;
+	int rv;
 
 	D("Register notifier: 0x%p.\n", (void *)n);
 
 	BUG_ON(!n->notifier_call);
 
-	/* Notify in auto mode. */
-	if (!uh->b_notify_mode)
+	rv = blocking_notifier_chain_register(&uh->notifier_head, n);
+
+	/* Notify in auto mode: unconditionally bring MUSB online when a gadget
+	 * driver (g_ether / g_file_storage) registers, so boards without a wired
+	 * VBUS detect GPIO (e.g. RS-97 Plus) enumerate immediately. */
+	if (!uh->b_notify_mode) {
+		uh->cable_state = UH_CABLE_STATE_USB;
 		n->notifier_call(n, UH_NOTIFY_CABLE_STATE, &uh->cable_state);
-	
-	return blocking_notifier_chain_register(&uh->notifier_head, n);
+	}
+
+	return rv;
 }EXPORT_SYMBOL(uh_register_notifier);
 
 int uh_unregister_notifier(struct notifier_block *n)
@@ -624,8 +652,16 @@ static ssize_t store_notify(struct device *device, struct device_attribute *attr
 {
 	struct uh_data *uh = g_puh_data;
 
-	if (!strncmp(buf, "auto", 4)) { 
-		uh_start_work(uh, DO_ALL);
+	if (!strncmp(buf, "auto", 4) || !strncmp(buf, "detect", 6)) {
+		uh_start_work(uh, DO_FORCE_DETECT | DO_NOTIFY);
+	} else if (!strncmp(buf, "usb", 3)) {
+		set_cable_state(uh, UH_CABLE_STATE_USB);
+		set_bit(BIT_CABLE_STATE_CHANGE, &uh->flags);
+		uh_start_work(uh, DO_NOTIFY);
+	} else if (!strncmp(buf, "offline", 7)) {
+		set_cable_state(uh, UH_CABLE_STATE_OFFLINE);
+		set_bit(BIT_CABLE_STATE_CHANGE, &uh->flags);
+		uh_start_work(uh, DO_NOTIFY);
 	}
 
 	return count;

@@ -883,7 +883,12 @@ b_host:
 void musb_start(struct musb *musb)
 {
 	void __iomem	*regs = musb->mregs;
-	u8		devctl = musb_readb(regs, MUSB_DEVCTL);
+	u8		devctl;
+
+	/* Enable USB PHY clock before touching MUSB registers (needed on JZ4760B) */
+	musb_platform_enable(musb);
+
+	devctl = musb_readb(regs, MUSB_DEVCTL);
 
 	DBG(2, "<== devctl %02x\n", devctl);
 
@@ -925,7 +930,6 @@ void musb_start(struct musb *musb)
 		if ((devctl & MUSB_DEVCTL_VBUS) == MUSB_DEVCTL_VBUS)
 			musb->is_active = 1;
 	}
-	musb_platform_enable(musb);
 	musb_writeb(regs, MUSB_DEVCTL, devctl);
 }
 
