@@ -192,25 +192,29 @@ static int cgm_write_proc(struct file *file, const char *buffer, unsigned long c
 }
 
 /*
- * Safe kernel-side CPU clock controller (/proc/jz/clock)
- * Atomically scales PLL0 (240..720 MHz in 6 MHz steps) with IRQs disabled,
- * keeps DDR2 auto-refresh (DDRC_REFCNT) proportional to MCLK, and keeps
- * LCD pixel clock (LPCDR) locked to the panel's boot 60 Hz refresh rate.
+ * Safe kernel-side dual-tier CPU clock controller (/proc/jz/clock)
+ * - Standard tier (240..702 MHz, 6 MHz steps): PLLN=2, PLLOD=1, boot 1:2:4:4 bus
+ * - Relaxed-bus OC tier (708..816 MHz, 12 MHz steps): PLLN=2, PLLOD=0 (clean VCO),
+ *   bus dividers relaxed to 1:3:6:6 so DDR2 MCLK stays safely at 120..136 MHz!
+ * Keeps DDR2 auto-refresh (DDRC_REFCNT) proportional to actual MCLK and keeps
+ * LCD pixel clock (LPCDR) locked to the panel's boot ~60 Hz refresh rate.
  */
 extern jz_clocks_t jz_clocks;
 
-static unsigned int jz_boot_cclk_mhz;
+static unsigned int jz_boot_mclk_mhz;
+static unsigned int jz_boot_cpccr;
 static unsigned int jz_boot_pixclk_hz;
 static unsigned int jz_boot_refcnt_con;
 static unsigned int jz_boot_refcnt_low;
 
 static void jz_clock_capture_boot(void)
 {
-	if (jz_boot_cclk_mhz)
+	if (jz_boot_mclk_mhz)
 		return;
-	jz_boot_cclk_mhz = cpm_get_clock(CGU_CCLK) / 1000000;
-	if (jz_boot_cclk_mhz < 240 || jz_boot_cclk_mhz > 720)
-		jz_boot_cclk_mhz = 528;
+	jz_boot_cpccr = REG_CPM_CPCCR;
+	jz_boot_mclk_mhz = cpm_get_clock(CGU_MCLK) / 1000000;
+	if (jz_boot_mclk_mhz < 60 || jz_boot_mclk_mhz > 200)
+		jz_boot_mclk_mhz = 132;
 	jz_boot_pixclk_hz = cpm_get_clock(CGU_LPCLK);
 	if (jz_boot_pixclk_hz < 1000000 || jz_boot_pixclk_hz > 100000000)
 		jz_boot_pixclk_hz = 35200000;
@@ -220,9 +224,9 @@ static void jz_clock_capture_boot(void)
 		jz_boot_refcnt_con = 0x1d;
 }
 
-static void jz_clock_apply_refcnt(unsigned int target_mhz)
+static void jz_clock_apply_refcnt_mclk(unsigned int target_mclk_mhz)
 {
-	unsigned int con = (jz_boot_refcnt_con * target_mhz) / jz_boot_cclk_mhz;
+	unsigned int con = (jz_boot_refcnt_con * target_mclk_mhz) / jz_boot_mclk_mhz;
 	if (con < 1)
 		con = 1;
 	if (con > 0xff)
@@ -230,47 +234,33 @@ static void jz_clock_apply_refcnt(unsigned int target_mhz)
 	REG_DDRC_REFCNT = (con << DDRC_REFCNT_CON_BIT) | jz_boot_refcnt_low;
 }
 
-static int jz_clock_set_mhz(unsigned int req_mhz)
+static void jz_clock_write_cpccr(unsigned int cpccr)
 {
-	unsigned int cur_mhz, pllm, new_mhz, new_cppcr;
-	unsigned int pll_for_pix, new_div, timeout;
-	unsigned long flags;
+	unsigned int tmp = 0, wait = 256;
 
-	jz_clock_capture_boot();
+	cpccr |= CPCCR_CE;
+	__asm__ __volatile__(
+		".set noreorder\n\t"
+		".align 5\n\t"
+		"sw %1, 0(%0)\n\t"
+		"li %3, 0\n\t"
+		"1:\n\t"
+		"bne %3, %2, 1b\n\t"
+		"addiu %3, %3, 1\n\t"
+		"nop\n\t"
+		"nop\n\t"
+		"nop\n\t"
+		"nop\n\t"
+		".set reorder\n\t"
+		:
+		: "r" (CPM_CPCCR), "r" (cpccr), "r" (wait), "r" (tmp)
+		: "memory");
+}
 
-	/* Do not alter PLL0 while TV-out is active */
-	if (REG_CPM_LPCDR & LPCDR_LTCS)
-		return -EBUSY;
+static void jz_clock_write_cppcr0(unsigned int cppcr)
+{
+	unsigned int timeout = 100000;
 
-	if (req_mhz < 240)
-		req_mhz = 240;
-	if (req_mhz > 720)
-		req_mhz = 720;
-
-	pllm = (req_mhz + 3) / 6;
-	if (pllm < 40)
-		pllm = 40;
-	if (pllm > 120)
-		pllm = 120;
-	new_mhz = pllm * 6;
-
-	cur_mhz = cpm_get_clock(CGU_CCLK) / 1000000;
-	if (cur_mhz == new_mhz)
-		return 0;
-
-	new_cppcr = (pllm << CPPCR0_PLLM_LSB)
-		  | (2 << CPPCR0_PLLN_LSB)
-		  | (1 << CPPCR0_PLLOD_LSB)
-		  | (0x20 << CPPCR0_PLLST_LSB)
-		  | CPPCR0_PLLEN;
-
-	local_irq_save(flags);
-
-	/* Going slower: tighten DDR refresh counter BEFORE lowering MCLK */
-	if (new_mhz < cur_mhz)
-		jz_clock_apply_refcnt(new_mhz);
-
-	/* Cache-line-aligned PLL0 write so instruction fetch stays in I-cache */
 	__asm__ __volatile__(
 		".set noreorder\n\t"
 		".align 5\n\t"
@@ -283,16 +273,107 @@ static int jz_clock_set_mhz(unsigned int req_mhz)
 		"nop\n\t"
 		".set reorder\n\t"
 		:
-		: "r" (CPM_CPPCR0), "r" (new_cppcr)
+		: "r" (CPM_CPPCR0), "r" (cppcr)
 		: "memory");
 
-	timeout = 100000;
 	while (!(REG_CPM_CPPCR0 & CPPCR0_PLLS) && --timeout)
 		;
+}
 
-	/* Going faster: relax DDR refresh counter AFTER raising MCLK */
-	if (new_mhz > cur_mhz)
-		jz_clock_apply_refcnt(new_mhz);
+static unsigned int jz_clock_oc_cpccr(void)
+{
+	unsigned int c = jz_boot_cpccr;
+
+	/* Relax C:H:M:P:H2:S from 1:2:4:4:4:4 to 1:3:6:6:6:6 (0,2,4,4,4,4) */
+	c &= ~(CPCCR_CDIV_MASK | CPCCR_HDIV_MASK | CPCCR_PDIV_MASK |
+	       CPCCR_MDIV_MASK | CPCCR_H2DIV_MASK | CPCCR_SDIV_MASK);
+	c |= (0 << CPCCR_CDIV_LSB)
+	   | (2 << CPCCR_HDIV_LSB)
+	   | (4 << CPCCR_PDIV_LSB)
+	   | (4 << CPCCR_MDIV_LSB)
+	   | (4 << CPCCR_H2DIV_LSB)
+	   | (4 << CPCCR_SDIV_LSB);
+	return c;
+}
+
+static int jz_clock_set_mhz(unsigned int req_mhz)
+{
+	unsigned int cur_mhz, cur_mclk, new_mhz, new_mclk;
+	unsigned int pllm, pllod, new_cppcr;
+	unsigned int pll_for_pix, new_div;
+	int cur_oc, new_oc;
+	unsigned long flags;
+
+	jz_clock_capture_boot();
+
+	/* Do not alter PLL0 while TV-out is active */
+	if (REG_CPM_LPCDR & LPCDR_LTCS)
+		return -EBUSY;
+
+	if (req_mhz < 240)
+		req_mhz = 240;
+	if (req_mhz > 816)
+		req_mhz = 816;
+
+	cur_mhz = cpm_get_clock(CGU_CCLK) / 1000000;
+	cur_mclk = cpm_get_clock(CGU_MCLK) / 1000000;
+	cur_oc = (__cpm_get_mdiv() >= 4);
+
+	if (req_mhz > 702) {
+		/* Relaxed-bus OC tier: 12 MHz steps via PLLN=2, PLLOD=0 (clean VCO) */
+		new_oc = 1;
+		pllod = 0;
+		pllm = (req_mhz + 6) / 12;
+		if (pllm < 60)
+			pllm = 60;	/* 720 MHz */
+		if (pllm > 68)
+			pllm = 68;	/* 816 MHz */
+		new_mhz = pllm * 12;
+		new_mclk = new_mhz / 6;
+	} else {
+		/* Standard tier: 6 MHz steps via PLLN=2, PLLOD=1 (1:2:4:4 bus) */
+		new_oc = 0;
+		pllod = 1;
+		pllm = (req_mhz + 3) / 6;
+		if (pllm < 40)
+			pllm = 40;	/* 240 MHz */
+		if (pllm > 117)
+			pllm = 117;	/* 702 MHz */
+		new_mhz = pllm * 6;
+		new_mclk = new_mhz / 4;
+	}
+
+	if (cur_mhz == new_mhz && cur_oc == new_oc)
+		return 0;
+
+	new_cppcr = (pllm << CPPCR0_PLLM_LSB)
+		  | (2 << CPPCR0_PLLN_LSB)
+		  | (pllod << CPPCR0_PLLOD_LSB)
+		  | (0x20 << CPPCR0_PLLST_LSB)
+		  | CPPCR0_PLLEN;
+
+	local_irq_save(flags);
+
+	if (!cur_oc && new_oc) {
+		/* Entering OC tier: relax dividers FIRST (MCLK drops temporarily), then raise PLL */
+		jz_clock_apply_refcnt_mclk(cur_mhz / 6);
+		jz_clock_write_cpccr(jz_clock_oc_cpccr());
+		jz_clock_write_cppcr0(new_cppcr);
+		jz_clock_apply_refcnt_mclk(new_mclk);
+	} else if (cur_oc && !new_oc) {
+		/* Leaving OC tier: lower PLL FIRST, then restore 1:2:4:4 dividers */
+		jz_clock_apply_refcnt_mclk(new_mhz / 6);
+		jz_clock_write_cppcr0(new_cppcr);
+		jz_clock_write_cpccr(jz_boot_cpccr);
+		jz_clock_apply_refcnt_mclk(new_mclk);
+	} else {
+		/* Same tier: tighten REFCNT before slowing, relax after speeding */
+		if (new_mclk < cur_mclk)
+			jz_clock_apply_refcnt_mclk(new_mclk);
+		jz_clock_write_cppcr0(new_cppcr);
+		if (new_mclk > cur_mclk)
+			jz_clock_apply_refcnt_mclk(new_mclk);
+	}
 
 	/* Keep LCD pixel clock locked to boot panel refresh rate (~60 Hz) */
 	pll_for_pix = (REG_CPM_CPCCR & CPCCR_PCS) ? (new_mhz * 1000000) : (new_mhz * 500000);
@@ -322,10 +403,13 @@ static int clock_read_proc(char *page, char **start, off_t off,
 
 	jz_clock_capture_boot();
 	len += sprintf(page + len, "%u\n", cpm_get_clock(CGU_CCLK) / 1000000);
-	len += sprintf(page + len, "CCLK: %3d.%02d MHz (range 240..720)\n", TO_MHZ(cpm_get_clock(CGU_CCLK)));
+	len += sprintf(page + len, "CCLK: %3d.%02d MHz (range 240..816, OC tier >702 uses 1:3:6:6)\n",
+		       TO_MHZ(cpm_get_clock(CGU_CCLK)));
 	len += sprintf(page + len, "HCLK: %3d.%02d MHz\n", TO_MHZ(cpm_get_clock(CGU_HCLK)));
-	len += sprintf(page + len, "MCLK: %3d.%02d MHz (REFCNT=0x%08x)\n", TO_MHZ(cpm_get_clock(CGU_MCLK)), REG_DDRC_REFCNT);
-	len += sprintf(page + len, "PIX:  %3d.%02d KHz (target %u KHz)\n", TO_KHZ(cpm_get_clock(CGU_LPCLK)), jz_boot_pixclk_hz / 1000);
+	len += sprintf(page + len, "MCLK: %3d.%02d MHz (REFCNT=0x%08x)\n",
+		       TO_MHZ(cpm_get_clock(CGU_MCLK)), REG_DDRC_REFCNT);
+	len += sprintf(page + len, "PIX:  %3d.%02d KHz (target %u KHz)\n",
+		       TO_KHZ(cpm_get_clock(CGU_LPCLK)), jz_boot_pixclk_hz / 1000);
 	*eof = 1;
 	return len;
 }
@@ -343,7 +427,7 @@ static int clock_write_proc(struct file *file, const char __user *buffer,
 	kbuf[len] = '\0';
 
 	mhz = (unsigned int)simple_strtoul(kbuf, NULL, 10);
-	if (mhz < 240 || mhz > 720)
+	if (mhz < 240 || mhz > 816)
 		return -EINVAL;
 
 	ret = jz_clock_set_mhz(mhz);

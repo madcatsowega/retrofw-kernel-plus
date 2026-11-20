@@ -25,6 +25,8 @@ if [ "${1:-}" = "--clean" ] || [ ! -f .config ]; then
     ./scripts/config --disable SLUB_DEBUG
     # 4. Built-in LZO compressed RAM swap (/dev/ramzswap0 + /proc/ramzswap)
     ./scripts/config --enable BLK_DEV_JZ_RAMZSWAP --enable LZO_COMPRESS --enable LZO_DECOMPRESS
+    # 5. Larger SquashFS fragment cache (8 vs 3) for snappier rootfs & OPK loading
+    ./scripts/config --set-val SQUASHFS_FRAGMENT_CACHE_SIZE 8
 
     set +o pipefail
     yes "" | make oldconfig >/dev/null
@@ -32,7 +34,7 @@ if [ "${1:-}" = "--clean" ] || [ ! -f .config ]; then
 fi
 
 echo "=== Active Kernel+ Config ==="
-grep -E 'CONFIG_LCD_Y030XX067A|CONFIG_GPIO_RETROGAME|CONFIG_HZ=|CONFIG_PREEMPT_VOLUNTARY|CONFIG_SLUB_DEBUG|CONFIG_DEFAULT_IOSCHED|CONFIG_BLK_DEV_JZ_RAMZSWAP|CONFIG_LZO_' .config || true
+grep -E 'CONFIG_LCD_Y030XX067A|CONFIG_GPIO_RETROGAME|CONFIG_HZ=|CONFIG_PREEMPT_VOLUNTARY|CONFIG_SLUB_DEBUG|CONFIG_DEFAULT_IOSCHED|CONFIG_BLK_DEV_JZ_RAMZSWAP|CONFIG_LZO_|CONFIG_SQUASHFS_FRAGMENT_CACHE_SIZE' .config || true
 
 echo "=== Building uImage + modules with $(mipsel-linux-gcc --version | head -n1) ==="
 make -j"$(nproc)" uImage modules
