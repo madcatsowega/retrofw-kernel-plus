@@ -474,6 +474,14 @@ config VIRTIO_BLK
 	  This is the virtual block driver for virtio.  It can be used with
           lguest or QEMU based VMMs (like KVM or Xen).  Say Y or M.
 
+config BLK_DEV_JZ_RAMZSWAP
+	tristate "LZO compressed RAM swap block device (/dev/ramzswap0)"
+	select LZO_COMPRESS
+	select LZO_DECOMPRESS
+	help
+	  Provides a lightweight LZO1X compressed RAM swap block device
+	  (/dev/ramzswap0) with live statistics at /proc/ramzswap.
+
 config BLK_DEV_HD
 	bool "Very old hard disk (MFM/RLL/IDE) driver"
 	depends on HAVE_IDE
