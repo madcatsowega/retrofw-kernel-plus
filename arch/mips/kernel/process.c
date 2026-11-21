@@ -97,6 +97,7 @@ void start_thread(struct pt_regs * regs, unsigned long pc, unsigned long sp)
 	clear_fpu_owner();
 	if (cpu_has_dsp)
 		__init_dsp();
+	__init_mxu(current);
 	regs->cp0_epc = pc;
 	regs->regs[29] = sp;
 	current_thread_info()->addr_limit = USER_DS;
@@ -127,6 +128,8 @@ int copy_thread(unsigned long clone_flags, unsigned long usp,
 
 	if (cpu_has_dsp)
 		save_dsp(p);
+
+	__save_mxu(p);
 
 	preempt_enable();
 

@@ -20,6 +20,7 @@
 #include <asm/cmpxchg.h>
 #include <asm/cpu-features.h>
 #include <asm/dsp.h>
+#include <asm/jz_mxu_ctx.h>
 #include <asm/watch.h>
 #include <asm/war.h>
 
@@ -68,6 +69,7 @@ do {									\
 	__mips_mt_fpaff_switch_to(prev);				\
 	if (cpu_has_dsp)						\
 		__save_dsp(prev);					\
+	__save_mxu(prev);						\
 	(last) = resume(prev, next, task_thread_info(next));		\
 } while (0)
 
@@ -75,6 +77,7 @@ do {									\
 do {									\
 	if (cpu_has_dsp)						\
 		__restore_dsp(current);					\
+	__restore_mxu(current);						\
 	if (cpu_has_userlocal)						\
 		write_c0_userlocal(current_thread_info()->tp_value);	\
 	__restore_watch();						\

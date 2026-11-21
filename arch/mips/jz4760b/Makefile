@@ -37,7 +37,7 @@ endif
 endif
 
 obj-$(CONFIG_JZ4760_F4760)	+= board-f4760.o
-obj-$(CONFIG_SOC_JZ4760B)        += fpu.o
+obj-$(CONFIG_SOC_JZ4760B)        += fpu.o mxu.o
 
 # PM support
 
