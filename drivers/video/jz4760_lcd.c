@@ -1505,6 +1505,21 @@ void jz4760fb_set_backlight_level(int n)
 	D("");
 	struct lcd_cfb_info *cfb = jz4760fb_info;
 
+#ifdef CONFIG_LCD_Y030XX067A
+	if (n < 1 || tve_mode) { /* True PWM LED off without cutting IPS panel state */
+		__tcu_disable_pwm_output(LCD_PWM_CHN);
+		__tcu_stop_counter(LCD_PWM_CHN);
+		__lcd_close_backlight();
+		cfb->b_lcd_display = 0;
+	} else {
+		if (n > LCD_MAX_BACKLIGHT) n = LCD_MAX_BACKLIGHT;
+		if (n < LCD_MIN_BACKLIGHT) n = LCD_MIN_BACKLIGHT;
+
+		cfb->backlight_level = n;
+		__lcd_set_backlight_level(n);
+		cfb->b_lcd_display = 1;
+	}
+#else
 	if (n < 1 || tve_mode) { // Turn off LCD backlight
 		screen_off();
 
@@ -1519,6 +1534,7 @@ void jz4760fb_set_backlight_level(int n)
 			__lcd_set_backlight_level(n);
 		}
 	}
+#endif
 }
 
 int jz4760fb_get_backlight_level(void)

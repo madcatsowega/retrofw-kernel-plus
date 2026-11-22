@@ -135,9 +135,13 @@ static void jz_kbd_poll(struct input_polled_dev *dev)
 	if (key_mode != 3 && s & (1 << GPIO_BACKLIGHT) && !kbd->backlight_state) {
 		backlight_value = jz4760fb_get_backlight_level();
 		if (!backlight_value) return;
-		backlight_value += 10;
-		if (backlight_value >= 110) backlight_value = 5;
-		else if (backlight_value > 100) backlight_value = 100;
+		if (backlight_value < 5) backlight_value = 5;
+		else if (backlight_value < 10) backlight_value = 10;
+		else if (backlight_value >= 100) backlight_value = 1;
+		else {
+			backlight_value = ((backlight_value / 10) + 1) * 10;
+			if (backlight_value > 100) backlight_value = 100;
+		}
 		jz4760fb_set_backlight_level(backlight_value);
 	}
 	kbd->backlight_state = s; /* Update current backlight button state */
