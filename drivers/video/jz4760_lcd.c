@@ -1515,6 +1515,12 @@ void jz4760fb_set_backlight_level(int n)
 		if (n > LCD_MAX_BACKLIGHT) n = LCD_MAX_BACKLIGHT;
 		if (n < LCD_MIN_BACKLIGHT) n = LCD_MIN_BACKLIGHT;
 
+		/* Wake the LED boost IC from hardware shutdown before dropping to ultra-dim PWM */
+		if (!cfb->b_lcd_display && n < 10) {
+			__lcd_set_backlight_level(20);
+			mdelay(2);
+		}
+
 		cfb->backlight_level = n;
 		__lcd_set_backlight_level(n);
 		cfb->b_lcd_display = 1;
